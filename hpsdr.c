@@ -73,7 +73,6 @@ static int hpsdr_tx_device_open(struct inode *inode, struct file *filp) {
 	dev = container_of(inode->i_cdev, struct hpsdr_dev, cdev);
 	filp->private_data = dev;
 
-	//  These registers should be in the filp priv structure
 	dev->led_registers = (uint8_t *) ioremap(LWH2FBRG_BASE + LED_BASE, sizeof(uint8_t));
 	dev->memory_registers = (uint32_t *) ioremap(H2FBRG_BASE, sizeof(uint32_t) * 64);
 
@@ -81,12 +80,6 @@ static int hpsdr_tx_device_open(struct inode *inode, struct file *filp) {
 	for(i = 0; i < 64; ++i) {
 		pr_info("%d: %8.8X\n", i, ioread32(dev->memory_registers + (i * sizeof(uint32_t))));
 	} */
-
-	//  ALlocate a fifo for the device data
-	if(kfifo_alloc(&dev->read_fifo, FIFO_SIZE, GFP_KERNEL)) {
-		err("Couldn't allocate a read FIFO\n");
-		return -ENOMEM;
-	}
 
 	return 0;
 }
@@ -140,6 +133,12 @@ static struct file_operations rx_fops = {
 };
 
 static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
+	//  ALlocate a fifo for the device data
+	if(kfifo_alloc(&dev->read_fifo, FIFO_SIZE, GFP_KERNEL)) {
+		err("Couldn't allocate a read FIFO\n");
+		return -ENOMEM;
+	}
+
 	if(device_create(hpsdr_class, NULL, first_dev + index, NULL, "hpsdrrx%d", index) == NULL) {
 		return -1;
 	}
