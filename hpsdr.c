@@ -39,6 +39,7 @@ module_param(hpsdr_nr_rx, int, S_IRUGO);
 static struct class *hpsdr_class = NULL;
 static dev_t first_dev;
 static uint32_t *capture_registers;
+static uint32_t rx_buffer[96];
 
 //  These should be in a filp eventually
 struct hpsdr_dev {
@@ -51,7 +52,14 @@ struct hpsdr_dev {
 static struct hpsdr_dev *hpsdr_devices;
 
 static irqreturn_t hpsdr_irq_handler(int irq, void *dev_id) {
+	int i;
+	
 	info("Received hpsdr interrupt\n");
+
+	for(i = 0; i < hpsdr_nr_rx; ++i) {
+		ioread32_rep(hpsdr_devices[i].memory_registers, rx_buffer, 96);
+		kfifo_in(&hpsdr_devices[i].read_fifo, rx_buffer, sizeof(rx_buffer));
+	}
 
 	//  Need to clear the caputre register to reset the interrupt
 	iowrite32(0x00000000, capture_registers);
@@ -80,6 +88,24 @@ static int hpsdr_tx_device_open(struct inode *inode, struct file *filp) {
 	for(i = 0; i < 64; ++i) {
 		pr_info("%d: %8.8X\n", i, ioread32(dev->memory_registers + (i * sizeof(uint32_t))));
 	} */
+
+	return 0;
+}
+
+static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
+	struct hpsdr_dev *dev;
+
+	/* if(((filp->f_flags & O_ACCMODE) == O_WRONLY) || 
+           ((filp->f_flags & O_ACCMODE) == O_RDWR)) {
+		return -EACCES;
+	} */
+
+	dev = container_of(inode->i_cdev, struct hpsdr_dev, cdev);
+	filp->private_data = dev;
+
+
+	dev = container_of(inode->i_cdev, struct hpsdr_dev, cdev);
+	filp->private_data = dev;
 
 	return 0;
 }
@@ -127,7 +153,7 @@ static struct file_operations tx_fops = {
 
 static struct file_operations rx_fops = {
 	.write = hpsdr_tx_device_write,
-	.open = hpsdr_tx_device_open,
+	.open = hpsdr_rx_device_open,
 	.release = hpsdr_tx_device_close,
 	.unlocked_ioctl = hpsdr_tx_device_ioctl
 };
@@ -138,6 +164,8 @@ static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
 		err("Couldn't allocate a read FIFO\n");
 		return -ENOMEM;
 	}
+
+	dev->memory_registers = (uint32_t *) ioremap(H2FBRG_BASE, sizeof(uint32_t) * 64);
 
 	if(device_create(hpsdr_class, NULL, first_dev + index, NULL, "hpsdrrx%d", index) == NULL) {
 		return -1;
