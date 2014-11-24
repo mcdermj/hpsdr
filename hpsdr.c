@@ -11,20 +11,34 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/moduleparam.h>
+#include <linux/semaphore.h>
+#include <linux/sched.h>
 
 #include "hpsdr.h"
 
-#define TX_DEVICE_NAME "tx"
 #define CLASS_NAME "hpsdr"
 
 #define LWH2FBRG_BASE	0xFF200000
 #define H2FBRG_BASE	0xC0000000
-#define LED_BASE	0x00010040
-#define LED_SIZE	0x20
-#define BUTTON_BASE	0x000100c0
-#define BUTTON_SIZE	0x0F
-#define BUTTON_IRQ	73
+
 #define FIFO_SIZE	24192
+#define HW_FIFO_SIZE 	4096
+#define RX_INT_BUFFER_SIZE 512
+
+#define FIFO_STATUS_BASE LWH2FBRG_BASE + 0x00000000
+#define FIFO_OUTPUT_BASE H2FBRG_BASE + 0x00000000
+
+#define FIFO_FILL_LEVEL FIFO_STATUS_BASE + 0x00
+#define FIFO_I_STATUS FIFO_STATUS_BASE + 0x04
+#define FIFO_EVENT FIFO_STATUS_BASE + 0x08
+#define FIFO_INTERRUPT_ENABLE FIFO_STATUS_BASE + 0x0C
+#define FIFO_ALMOST_FULL FIFO_STATUS_BASE + 0x10
+
+#define FIFO_IRQ	72
+
+#define LED_CONTROL_BASE LWH2FBRG_BASE + 0x00000400
+
+#define FIFO_CONTROL_BASE LWH2FBRG_BASE + 0x00000800
 
 #define HPSDR_NR_RX	7
 
@@ -38,136 +52,204 @@ module_param(hpsdr_nr_rx, int, S_IRUGO);
 
 static struct class *hpsdr_class = NULL;
 static dev_t first_dev;
-static uint32_t *capture_registers;
-static uint32_t rx_buffer[96];
 
 //  These should be in a filp eventually
 struct hpsdr_dev {
-	uint8_t *led_registers;
-	uint32_t *memory_registers;
-	struct kfifo read_fifo;
 	struct cdev cdev;
+	uint32_t *fifo_register;
+	uint8_t *event;
+	DECLARE_KFIFO_PTR(read_fifo, uint32_t);
+	struct semaphore sem;
+	wait_queue_head_t queue;
+	uint8_t index;
+	uint32_t *rx_buffer;
+	uint32_t *filllevel_reg;
+	uint32_t *status_reg;
+	uint32_t *led_control_reg;
+	uint32_t *fifo_control_reg;
 };
+
+// XXX This really shouldn't be here
+static ssize_t divisor_store(struct device *dev, struct device_attribute *attr,
+		      const char *buffer, size_t size);
+static ssize_t divisor_show(struct device *dev, struct device_attribute *attr, char *buffer);
+
+static DEVICE_ATTR_RW(divisor);
+
+static struct attribute *control_attrs[] = {
+	&dev_attr_divisor.attr,
+	NULL,
+};
+
+ATTRIBUTE_GROUPS(control);
 
 static struct hpsdr_dev *hpsdr_devices;
 
 static irqreturn_t hpsdr_irq_handler(int irq, void *dev_id) {
-	int i;
-	
-	info("Received hpsdr interrupt\n");
+	struct hpsdr_dev *dev = (struct hpsdr_dev *) dev_id;
 
-	for(i = 0; i < hpsdr_nr_rx; ++i) {
-		ioread32_rep(hpsdr_devices[i].memory_registers, rx_buffer, 96);
-		kfifo_in(&hpsdr_devices[i].read_fifo, rx_buffer, sizeof(rx_buffer));
-	}
+	//err("Running interrupt handler\n");
+	ioread32_rep(dev->fifo_register, dev->rx_buffer, RX_INT_BUFFER_SIZE);
+	//print_hex_dump(KERN_ERR, "raw data: ", DUMP_PREFIX_ADDRESS, 16, 4, dev->rx_buffer, RX_INT_BUFFER_SIZE * sizeof(uint32_t), 1);
 
-	//  Need to clear the caputre register to reset the interrupt
-	iowrite32(0x00000000, capture_registers);
+	kfifo_in(&dev->read_fifo, dev->rx_buffer, RX_INT_BUFFER_SIZE);
+	wake_up_interruptible(&dev->queue);
+
+	//  Clear the event register to reset the interrupt
+	iowrite8(0xFF, dev->event);
+
 	return IRQ_HANDLED;
-}
-
-static int hpsdr_tx_device_open(struct inode *inode, struct file *filp) {
-	int i;
-	struct hpsdr_dev *dev;
-
-	//  Need to read from the device for testing
-	/* if(((filp->f_flags & O_ACCMODE) == O_RDONLY) || 
-           ((filp->f_flags & O_ACCMODE) == O_RDWR)) {
-		return -EACCES;
-	} */
-
-	//  Need to check if we're already open!
-
-	dev = container_of(inode->i_cdev, struct hpsdr_dev, cdev);
-	filp->private_data = dev;
-
-	dev->led_registers = (uint8_t *) ioremap(LWH2FBRG_BASE + LED_BASE, sizeof(uint8_t));
-	dev->memory_registers = (uint32_t *) ioremap(H2FBRG_BASE, sizeof(uint32_t) * 64);
-
-	/* info("Test reading FPS2FPGA bridge region\n");
-	for(i = 0; i < 64; ++i) {
-		pr_info("%d: %8.8X\n", i, ioread32(dev->memory_registers + (i * sizeof(uint32_t))));
-	} */
-
-	return 0;
 }
 
 static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 	struct hpsdr_dev *dev;
+	uint8_t *interrupts;
+	uint8_t event;
+	uint32_t *almostfull;
+	uint32_t *junk;
+	unsigned int filllevel;
 
 	/* if(((filp->f_flags & O_ACCMODE) == O_WRONLY) || 
            ((filp->f_flags & O_ACCMODE) == O_RDWR)) {
 		return -EACCES;
 	} */
 
-	dev = container_of(inode->i_cdev, struct hpsdr_dev, cdev);
-	filp->private_data = dev;
-
+	err("Beginning open\n");
 
 	dev = container_of(inode->i_cdev, struct hpsdr_dev, cdev);
 	filp->private_data = dev;
 
-	return 0;
-}
+	//  Clean out the FIFOs of old data
+	ioread32(dev->fifo_register);
+	dev->filllevel_reg = ioremap(FIFO_FILL_LEVEL, 4);
+	filllevel = ioread32(dev->filllevel_reg);
+	err("Cleaning out %d samples of junk\n", filllevel);
+	junk = kmalloc(filllevel * sizeof(uint32_t), GFP_KERNEL);
+	ioread32_rep(dev->fifo_register, junk, filllevel);
+	kfree(junk);
 
-static int hpsdr_tx_device_close(struct inode *inode, struct file *filp) {
-	struct hpsdr_dev *dev = filp->private_data;
+	kfifo_reset_out(&dev->read_fifo);
 
-	kfifo_free(&dev->read_fifo);
+	err("Cleaned FIFOs\n");
 
-	iounmap(dev->led_registers);
-	iounmap(dev->memory_registers);
-	return 0;
-}
+	dev->status_reg = ioremap(FIFO_I_STATUS, 4);
 
-static ssize_t hpsdr_tx_device_write(struct file *filp, const char __user *buffer, size_t length, loff_t *offset) {
-	//int retval;
-	struct hpsdr_dev *dev = filp->private_data;
+	//  Set the almost full threshold to the size of the buffer
+	almostfull = ioremap(FIFO_ALMOST_FULL, 4);
+	iowrite32(RX_INT_BUFFER_SIZE, almostfull);
+	iounmap(almostfull);
 
-	return length;
-}
+	err("Set Interrupt Threshold\n");
 
-static long hpsdr_tx_device_ioctl(struct file *filp, unsigned cmd, unsigned long arg) {
-	struct hpsdr_dev *dev = filp->private_data;
+	//  Enable interrupts on the hardware
+	interrupts = ioremap(FIFO_INTERRUPT_ENABLE, 1);
+	iowrite8(0x04, interrupts);
+	iounmap(interrupts);
 
-	switch(cmd) {
-		case HPSDR_IOCTPREAMP:
-			iowrite8((arg & 0x01), dev->led_registers);
-			break;
-		case HPSDR_IOCQPREAMP:
-			return ioread8(dev->led_registers) & 0x01;
-			break;
-		default:
-			return -ENOTTY;
+	err("Enabled hardware interrupts\n");
+	
+	//  Set up an interrupt handler
+	if(request_irq(FIFO_IRQ + dev->index, (irq_handler_t) hpsdr_irq_handler, 0, "hpsdr", (void *) dev)) {
+		err("Couldn't assign interrupt: %d\n", FIFO_IRQ + dev->index);
+		//  This isn't the right error
+		return -ENOMEM;
 	}
+
+	
+	//  Map the event field and clear interrupts
+	dev->event = ioremap(FIFO_EVENT, 1);
+
+	event = ioread8(dev->event);
+	err("Event reg is %hhx\n", event);
+	iowrite8(0xFF, dev->event);
+
+	err("Cleared event field\n");
+
+	iowrite32(0xFFFFFFFF, dev->fifo_control_reg);
+	err("Data flow enabled\n");
+
+	err("Open complete\n");
+
 	return 0;
 }
 
+static int hpsdr_rx_device_close(struct inode *inode, struct file *filp) {
+	struct hpsdr_dev *dev = filp->private_data;
+	uint8_t *interrupts;
 
-static struct file_operations tx_fops = {
-	.write = hpsdr_tx_device_write,
-	.open = hpsdr_tx_device_open,
-	.release = hpsdr_tx_device_close,
-	.unlocked_ioctl = hpsdr_tx_device_ioctl
-};
+	iowrite32(0x00000000, dev->fifo_control_reg);
+	err("Stopped Data flow\n");
+
+	//  Get rid of the interrupt handler
+	free_irq(FIFO_IRQ + dev->index, (void *) dev);
+
+	//  Disable interrupts in hardware
+	interrupts = ioremap(FIFO_INTERRUPT_ENABLE, 1);
+	iowrite8(0x00, interrupts);
+	iounmap(interrupts);
+
+	//  Unmap the event register
+	iounmap(dev->event);
+	iounmap(dev->filllevel_reg);
+	iounmap(dev->status_reg);
+
+	return 0;
+}
+
+static ssize_t hpsdr_rx_device_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos) {
+	int retval;
+	unsigned int copied;
+	struct hpsdr_dev *dev = filp->private_data;
+
+	info("In read\n");
+
+	if(down_interruptible(&dev->sem))
+		return -ERESTARTSYS;
+
+	while(kfifo_is_empty(&dev->read_fifo)) {
+		up(&dev->sem);
+		if(filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		if(wait_event_interruptible(dev->queue, !kfifo_is_empty(&dev->read_fifo)))
+			return -ERESTARTSYS;
+		if(down_interruptible(&dev->sem))
+			return -ERESTARTSYS;
+	}
+
+	// count = count > kfifo_len(&dev->read_fifo) ? kfifo_len(&dev->read_fifo) : count;
+	retval = kfifo_to_user(&dev->read_fifo, buf, count, &copied);
+	up(&dev->sem);
+	return retval ? retval : copied;
+}
 
 static struct file_operations rx_fops = {
-	.write = hpsdr_tx_device_write,
+	.read = hpsdr_rx_device_read,
 	.open = hpsdr_rx_device_open,
-	.release = hpsdr_tx_device_close,
-	.unlocked_ioctl = hpsdr_tx_device_ioctl
+	.release = hpsdr_rx_device_close,
 };
 
 static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
-	//  ALlocate a fifo for the device data
+	//  Allocate a fifo for the device data
 	if(kfifo_alloc(&dev->read_fifo, FIFO_SIZE, GFP_KERNEL)) {
 		err("Couldn't allocate a read FIFO\n");
 		return -ENOMEM;
 	}
 
-	dev->memory_registers = (uint32_t *) ioremap(H2FBRG_BASE, sizeof(uint32_t) * 64);
+	//  Map the hardware FIFO output register. The register for each receiver
+        //  is 4 bytes (a 32-bit value).  They are mapped sequentially into
+        //  memory from the base.
+	dev->fifo_register = (uint32_t *) ioremap(FIFO_OUTPUT_BASE + (index * 4), 4);
 
-	if(device_create(hpsdr_class, NULL, first_dev + index, NULL, "hpsdrrx%d", index) == NULL) {
+	//  XXX These offsets probably aren't good
+	dev->led_control_reg = (uint32_t *) ioremap(LED_CONTROL_BASE + (index * 4), 4);
+	dev->fifo_control_reg = (uint32_t *) ioremap(FIFO_CONTROL_BASE + (index * 4) , 4);
+
+	sema_init(&dev->sem, 1);
+	init_waitqueue_head(&dev->queue);
+	
+	dev->rx_buffer = kmalloc(RX_INT_BUFFER_SIZE * sizeof(uint32_t), GFP_KERNEL);
+
+	if(device_create(hpsdr_class, NULL, first_dev + index, dev, "hpsdrrx%d", index) == NULL) {
 		return -1;
 	}
 	cdev_init(&dev->cdev, &rx_fops);
@@ -178,6 +260,8 @@ static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
 		return -1;
 	}
 
+	dev->index = index;
+
 	return 0;
 }
 
@@ -186,10 +270,14 @@ static void hpsdr_cleanup_module(void) {
 
 	if(hpsdr_devices) {
 		for(i = 0; i < hpsdr_nr_rx; ++i) {
+	                kfifo_free(&hpsdr_devices[i].read_fifo);
+			kfree(hpsdr_devices[i].rx_buffer);
 			cdev_del(&hpsdr_devices[i].cdev);
 			device_destroy(hpsdr_class, first_dev + i);
 		}
 		kfree(hpsdr_devices);
+		iounmap(&hpsdr_devices[i].fifo_register);
+		iounmap(&hpsdr_devices[i].led_control_reg);
 	}
 
 	class_unregister(hpsdr_class);
@@ -201,7 +289,6 @@ static void hpsdr_cleanup_module(void) {
 static int __init hpsdr_init(void) {
 	int retval = -1;
 	int i;
-	uint32_t *button_registers;
 
 	if(alloc_chrdev_region(&first_dev, 0, hpsdr_nr_rx, "hpsdr") < 0) {
 		err("failed to register device region\n");
@@ -216,6 +303,9 @@ static int __init hpsdr_init(void) {
 		goto fail;
 	}
 
+	//  XXX Register device attribute groups for the class here.
+	hpsdr_class->dev_groups = control_groups;
+
 	//  Allocate the receiver devices
 	hpsdr_devices = kmalloc(hpsdr_nr_rx * sizeof(struct hpsdr_dev), GFP_KERNEL);
 	if(!hpsdr_devices) {
@@ -228,26 +318,13 @@ static int __init hpsdr_init(void) {
 		hpsdr_create_rxdev(i, &hpsdr_devices[i]);
 	}
 
+	// This is only advisory in the kernel now.  We should allocate memory regions in both the
+	// lightweight and regular FGPA->HPS bridges.
 	// Allocate memory region for the registers in the lightweight bridge
-	// This is for parameter changes accomplished through ioctls
-	if(request_mem_region(LWH2FBRG_BASE + LED_BASE, LED_SIZE, "hpsdr-control") == NULL) {
-		err("failed to reserve memory\n");
-		goto fail;
-	}
-
-	//  Set up an interrupt handler
-	if(request_irq(BUTTON_IRQ, (irq_handler_t) hpsdr_irq_handler, 0, "hpsdr", NULL)) {
-		err("Couldn't assign interrupt: %d\n", BUTTON_IRQ);
-		//  This isn't the right error
-		return -ENOMEM;
-	}
-
-	//  Remap memory and activate intrrupts
-	button_registers = (uint32_t *) ioremap(LWH2FBRG_BASE + BUTTON_BASE + 8, sizeof(uint32_t));
-	iowrite32(0xFFFFFFFF, button_registers);
-	iounmap(button_registers);
-	capture_registers = (uint32_t *) ioremap(LWH2FBRG_BASE + BUTTON_BASE + 12, sizeof(uint32_t));
-	iowrite32(0x00000000, capture_registers);
+	//if(request_mem_region(LWH2FBRG_BASE + LED_BASE, LED_SIZE, "hpsdr-control") == NULL) {
+	//	err("failed to reserve memory\n");
+	//	goto fail;
+	//}
 
 	return 0;
 
@@ -256,17 +333,41 @@ static int __init hpsdr_init(void) {
 		return retval;
 }
 
+//  sysfs stuff here
+static ssize_t divisor_store(struct device *dev, struct device_attribute *attr, const char *buffer, size_t size) {
+	uint32_t frequency;
+	uint32_t divisor;
+	struct hpsdr_dev *devinfo;
+
+	if(kstrtouint(buffer, 0, &frequency)) {
+		return -EFAULT;
+	}
+
+	err("sysfs gave us %d\n", frequency);
+	divisor = 50000000 / frequency; 
+
+	//  Figure out what device we're dealing with
+
+	err("device name is %s\n", dev_name(dev));
+	devinfo = dev_get_drvdata(dev);
+	err("Device index is %d\n", devinfo->index);
+	iowrite32(divisor, devinfo->led_control_reg);
+
+	return size;
+}
+
+static ssize_t divisor_show(struct device *dev, struct device_attribute *attr, char *buffer) {
+	uint32_t divisor;
+	struct hpsdr_dev *devinfo;
+
+	devinfo = dev_get_drvdata(dev);
+
+	divisor = ioread32(devinfo->led_control_reg);
+	return snprintf(buffer, PAGE_SIZE,  "%u", 50000000 / divisor);
+}
+
 static void __exit hpsdr_exit(void) {
-	uint32_t *button_registers;
-
-	//  Disable interrupts
-	button_registers = (uint32_t *) ioremap(LWH2FBRG_BASE + BUTTON_BASE + 8, sizeof(uint32_t));
-	iowrite32(0x00000000, button_registers);
-	iounmap(button_registers);
-	iounmap(capture_registers);
-	free_irq(BUTTON_IRQ, NULL);
-
-	release_mem_region(LWH2FBRG_BASE + LED_BASE, LED_SIZE);
+	// release_mem_region(LWH2FBRG_BASE + LED_BASE, LED_SIZE);
 	hpsdr_cleanup_module();
 }
 
