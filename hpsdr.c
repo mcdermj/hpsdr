@@ -216,8 +216,6 @@ static ssize_t hpsdr_rx_device_read(struct file *filp, char __user *buf, size_t 
 	unsigned int copied;
 	struct hpsdr_dev *dev = filp->private_data;
 
-	info("In read\n");
-
 	if(down_interruptible(&dev->sem))
 		return -ERESTARTSYS;
 
