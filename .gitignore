@@ -1,0 +1,12 @@
+.built-in.o.cmd
+.hpsdr.ko.cmd
+.hpsdr.mod.o.cmd
+.hpsdr.o.cmd
+.tmp_versions
+built-in.o
+hpsdr.ko
+hpsdr.mod.c
+hpsdr.mod.o
+hpsdr.o
+Module.symvers
+modules.order
