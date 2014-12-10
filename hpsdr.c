@@ -13,6 +13,7 @@
 #include <linux/moduleparam.h>
 #include <linux/semaphore.h>
 #include <linux/sched.h>
+#include <asm/div64.h>
 
 #include "hpsdr.h"
 
@@ -39,8 +40,11 @@
 #define LED_CONTROL_BASE LWH2FBRG_BASE + 0x00000400
 
 #define FIFO_CONTROL_BASE LWH2FBRG_BASE + 0x00000800
+#define PHASE_WORD_CONTROL_BASE FIFO_CONTROL_BASE + 4
 
 #define HPSDR_NR_RX	7
+
+#define M2 0x45E7B273
 
 #define err(format, arg...) pr_err(CLASS_NAME ": " format, ## arg)
 #define info(format, arg...) pr_info(CLASS_NAME ": " format, ## arg)
@@ -67,17 +71,21 @@ struct hpsdr_dev {
 	uint32_t *status_reg;
 	uint32_t *led_control_reg;
 	uint32_t *fifo_control_reg;
+	uint32_t *phase_word_control_reg;
 };
 
 // XXX This really shouldn't be here
-static ssize_t divisor_store(struct device *dev, struct device_attribute *attr,
-		      const char *buffer, size_t size);
+static ssize_t divisor_store(struct device *dev, struct device_attribute *attr, const char *buffer, size_t size);
 static ssize_t divisor_show(struct device *dev, struct device_attribute *attr, char *buffer);
+static ssize_t frequency_store(struct device *dev, struct device_attribute *attr, const char *buffer, size_t size);
+static ssize_t frequency_show(struct device *dev, struct device_attribute *attr, char *buffer);
 
 static DEVICE_ATTR_RW(divisor);
+static DEVICE_ATTR_RW(frequency);
 
 static struct attribute *control_attrs[] = {
 	&dev_attr_divisor.attr,
+	&dev_attr_frequency.attr,
 	NULL,
 };
 
@@ -243,6 +251,7 @@ static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
 	//  XXX These offsets probably aren't good
 	dev->led_control_reg = (uint32_t *) ioremap(LED_CONTROL_BASE + (index * 4), 4);
 	dev->fifo_control_reg = (uint32_t *) ioremap(FIFO_CONTROL_BASE + (index * 4) , 4);
+	dev->phase_word_control_reg = (uint32_t *) ioremap(PHASE_WORD_CONTROL_BASE + (index * 4), 4);
 
 	sema_init(&dev->sem, 1);
 	init_waitqueue_head(&dev->queue);
@@ -354,6 +363,52 @@ static ssize_t divisor_store(struct device *dev, struct device_attribute *attr, 
 	iowrite32(divisor, devinfo->led_control_reg);
 
 	return size;
+}
+
+static ssize_t frequency_store(struct device *dev, struct device_attribute *attr, const char *buffer, size_t size) {
+	uint32_t frequency;
+	uint64_t phaseword_tmp;
+	uint32_t phaseword;
+	struct hpsdr_dev *devinfo;
+
+	devinfo = dev_get_drvdata(dev);
+
+	if(kstrtouint(buffer, 0, &frequency)) {
+		return -EFAULT;
+	}
+	
+	//  XXX We should probably check the frequency values here to make sure they are from
+	//  XXX 1 Hz to 60MHz or so.
+
+	phaseword_tmp = (uint64_t) frequency * M2;
+	phaseword = phaseword_tmp >> 25;
+	iowrite32(phaseword, devinfo->phase_word_control_reg);
+
+	return size;
+}
+
+static ssize_t frequency_show(struct device *dev, struct device_attribute *attr, char *buffer) {
+	struct hpsdr_dev *devinfo;
+	uint32_t phaseword;
+	uint64_t phaseword_tmp;
+
+	devinfo = dev_get_drvdata(dev);
+
+	phaseword = ioread32(devinfo->phase_word_control_reg);
+	phaseword_tmp = (uint64_t) phaseword << 25;
+	
+	//  We use do_div here because the ARM Linux GCC produces an invalid symbol when doing
+	//  64-bit divides.  The kernel has a macro to make this work.
+	do_div(phaseword_tmp, M2);
+	
+	//  We add 1 to the result to account for rounding error.  This works for every
+	//  frequency from 1 Hz - 60 MHz except for 33.554432 MHz.  The math works out so that
+	//  you can never get this frequency back. It always becomes 33.554433.  If the
+	//  phaseword is 1172812403, we'll force this to be a frequency of 33554432.
+	if(phaseword != 1172812403)
+		++phaseword_tmp;
+
+	return snprintf(buffer, PAGE_SIZE, "%u", (uint32_t) phaseword_tmp);
 }
 
 static ssize_t divisor_show(struct device *dev, struct device_attribute *attr, char *buffer) {
