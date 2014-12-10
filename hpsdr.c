@@ -95,6 +95,7 @@ static struct hpsdr_dev *hpsdr_devices;
 
 static irqreturn_t hpsdr_irq_handler(int irq, void *dev_id) {
 	struct hpsdr_dev *dev = (struct hpsdr_dev *) dev_id;
+	uint8_t event;
 
 	//err("Running interrupt handler\n");
 	ioread32_rep(dev->fifo_register, dev->rx_buffer, RX_INT_BUFFER_SIZE);
@@ -102,6 +103,12 @@ static irqreturn_t hpsdr_irq_handler(int irq, void *dev_id) {
 
 	kfifo_in(&dev->read_fifo, dev->rx_buffer, RX_INT_BUFFER_SIZE);
 	wake_up_interruptible(&dev->queue);
+
+	event = ioread8(dev->event);
+	if(event & 0x10)
+		err("Event register indicates overflow: %hhx\n", event);
+	if(event & 0x20)
+		err("Event register indicates underflow: %hhx\n", event);
 
 	//  Clear the event register to reset the interrupt
 	iowrite8(0xFF, dev->event);
