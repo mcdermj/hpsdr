@@ -196,14 +196,6 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 
 	err("Enabled hardware interrupts\n");
 	
-	//  Set up an interrupt handler
-	if(request_irq(FIFO_IRQ + dev->index, (irq_handler_t) hpsdr_irq_handler, 0, "hpsdr", (void *) dev)) {
-		err("Couldn't assign interrupt: %d\n", FIFO_IRQ + dev->index);
-		//  This isn't the right error
-		return -ENOMEM;
-	}
-
-	
 	event = ioread8(dev->event);
 	err("Event reg is %hhx\n", event);
 	iowrite8(0xFF, dev->event);
@@ -212,6 +204,13 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 
 	iowrite32(0xFFFFFFFF, dev->fifo_control_reg);
 	err("Data flow enabled\n");
+	
+	//  Set up an interrupt handler
+	if(request_irq(FIFO_IRQ + dev->index, (irq_handler_t) hpsdr_irq_handler, 0, "hpsdr", (void *) dev)) {
+		err("Couldn't assign interrupt: %d\n", FIFO_IRQ + dev->index);
+		//  This isn't the right error
+		return -ENOMEM;
+	}
 
 	err("Open complete\n");
 
