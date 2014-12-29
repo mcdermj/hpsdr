@@ -203,9 +203,6 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 	}
 
 	
-	//  Map the event field and clear interrupts
-	dev->event = ioremap(FIFO_EVENT, 1);
-
 	event = ioread8(dev->event);
 	err("Event reg is %hhx\n", event);
 	iowrite8(0xFF, dev->event);
@@ -236,7 +233,7 @@ static int hpsdr_rx_device_close(struct inode *inode, struct file *filp) {
 	iounmap(interrupts);
 
 	//  Unmap the event register
-	iounmap(dev->event);
+	
 	iounmap(dev->status_reg);
 	
 	dev->open_count--;
@@ -290,6 +287,7 @@ static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
 	dev->led_control_reg = (uint32_t *) ioremap(LED_CONTROL_BASE + (index * 4), 4);
 	dev->fifo_control_reg = (uint32_t *) ioremap(FIFO_CONTROL_BASE + (index * 4) , 4);
 	dev->phase_word_control_reg = (uint32_t *) ioremap(PHASE_WORD_CONTROL_BASE + (index * 4), 4);
+	dev->event = ioremap(FIFO_EVENT + (index * 4), 1);
 	dev->filllevel_reg = ioremap(FIFO_FILL_LEVEL + (index * 4), 4);
 
 	sema_init(&dev->sem, 1);
@@ -330,6 +328,7 @@ static void hpsdr_cleanup_module(void) {
 		iounmap(&hpsdr_devices[i].fifo_register);
 		iounmap(&hpsdr_devices[i].led_control_reg);
 		iounmap(&hpsdr_devices[i].filllevel_reg);
+		iounmap(&hpsdr_devices[i].event);
 	}
 
 	class_unregister(hpsdr_class);
