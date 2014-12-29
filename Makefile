@@ -1,4 +1,9 @@
-KDIR ?= /home/mcdermj/yocto/build/tmp/work/socfpga_cyclone5-poky-linux-gnueabi/linux-altera-dist-1.0-r1/linux-socfpga/
+export ARCH := arm
+export CROSS_COMPILE := armv7l-unknown-linux-gnueabihf-
+KDIR ?= ../linux-socfpga
+
+upload: default
+	scp hpsdr.ko 198.178.136.63:
 
 default:
 	$(MAKE) -C $(KDIR) M=$$PWD
@@ -14,3 +19,4 @@ modules:
 
 modules_install:
 	$(MAKE) -C $(KDIR) M=$$PWD modules_install
+
