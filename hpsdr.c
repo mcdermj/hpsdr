@@ -22,8 +22,8 @@
 #define LWH2FBRG_BASE	0xFF200000
 #define H2FBRG_BASE	0xC0000000
 
-#define FIFO_SIZE	24192
-#define HW_FIFO_SIZE 	4096
+#define FIFO_SIZE	327680
+#define HW_FIFO_SIZE 	8192 //  In 32-bit words
 #define RX_INT_BUFFER_SIZE 512
 
 #define FIFO_STATUS_BASE LWH2FBRG_BASE + 0x00000000
@@ -182,7 +182,7 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 
 	//  Set the almost full threshold to the size of the buffer
 	almostfull = ioremap(FIFO_ALMOST_FULL, 4);
-	iowrite32(RX_INT_BUFFER_SIZE, almostfull);
+	iowrite32(HW_FIFO_SIZE / 16, almostfull);
 	iounmap(almostfull);
 
 	err("Set Interrupt Threshold\n");
@@ -297,7 +297,7 @@ static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
 	
 	dev->open_count = 0;
 	
-	dev->rx_buffer = kmalloc(RX_INT_BUFFER_SIZE * sizeof(uint32_t), GFP_KERNEL);
+	dev->rx_buffer = kmalloc(HW_FIFO_SIZE * sizeof(uint32_t), GFP_KERNEL);
 
 	if(device_create(hpsdr_class, NULL, first_dev + index, dev, "hpsdrrx%d", index) == NULL) {
 		return -1;
