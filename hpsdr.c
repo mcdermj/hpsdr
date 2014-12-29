@@ -190,7 +190,8 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 
 	//  Enable interrupts on the hardware
 	interrupts = ioremap(FIFO_INTERRUPT_ENABLE, 1);
-	iowrite8(0x04, interrupts);
+	//iowrite8(0x04, interrupts);
+	iowrite8(0x34, interrupts);
 	iounmap(interrupts);
 
 	err("Enabled hardware interrupts\n");
