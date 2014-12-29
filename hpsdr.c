@@ -167,8 +167,9 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 	err("Acquired spinlock\n");
 
 	//  Clean out the FIFOs of old data
-	ioread32(dev->fifo_register);
+	//ioread32(dev->fifo_register);
 	filllevel = ioread32(dev->filllevel_reg);
+	
 	err("Cleaning out %d samples of junk\n", filllevel);
 	junk = kmalloc(filllevel * sizeof(uint32_t), GFP_KERNEL);
 	ioread32_rep(dev->fifo_register, junk, filllevel);
