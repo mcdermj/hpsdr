@@ -96,19 +96,37 @@ static struct hpsdr_dev *hpsdr_devices;
 static irqreturn_t hpsdr_irq_handler(int irq, void *dev_id) {
 	struct hpsdr_dev *dev = (struct hpsdr_dev *) dev_id;
 	uint8_t event;
-
-	//err("Running interrupt handler\n");
-	ioread32_rep(dev->fifo_register, dev->rx_buffer, RX_INT_BUFFER_SIZE);
-	//print_hex_dump(KERN_ERR, "raw data: ", DUMP_PREFIX_ADDRESS, 16, 4, dev->rx_buffer, RX_INT_BUFFER_SIZE * sizeof(uint32_t), 1);
-
-	kfifo_in(&dev->read_fifo, dev->rx_buffer, RX_INT_BUFFER_SIZE);
-	wake_up_interruptible(&dev->queue);
-
+	unsigned int filllevel;
+	
+	if(dev == NULL) {
+		err("Null device in interrupt hander\n");
+		return -EIO;
+	}
+	
 	event = ioread8(dev->event);
-	if(event & 0x10)
+	if(event & 0x10) {
 		err("Event register indicates overflow: %hhx\n", event);
-	if(event & 0x20)
+	}
+	if(event & 0x20) {
 		err("Event register indicates underflow: %hhx\n", event);
+	}
+	
+	if(event & 0x04) {
+		filllevel = ioread32(dev->filllevel_reg);
+		// err("Reading %u entries from register\n", filllevel);
+		filllevel = filllevel == 0 ? HW_FIFO_SIZE : filllevel;
+
+		//err("Running interrupt handler\n");
+		ioread32_rep(dev->fifo_register, dev->rx_buffer, filllevel);
+		//print_hex_dump(KERN_ERR, "raw data: ", DUMP_PREFIX_ADDRESS, 16, 4, dev->rx_buffer, RX_INT_BUFFER_SIZE * sizeof(uint32_t), 1);
+
+		if(kfifo_is_full(&dev->read_fifo)) {
+			err("FIFO is full in interrupt handler\n");
+		}
+		kfifo_in(&dev->read_fifo, dev->rx_buffer, filllevel);
+		wake_up_interruptible(&dev->queue);
+	}
+
 
 	//  Clear the event register to reset the interrupt
 	iowrite8(0xFF, dev->event);
@@ -136,7 +154,6 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 
 	//  Clean out the FIFOs of old data
 	ioread32(dev->fifo_register);
-	dev->filllevel_reg = ioremap(FIFO_FILL_LEVEL, 4);
 	filllevel = ioread32(dev->filllevel_reg);
 	err("Cleaning out %d samples of junk\n", filllevel);
 	junk = kmalloc(filllevel * sizeof(uint32_t), GFP_KERNEL);
@@ -205,7 +222,6 @@ static int hpsdr_rx_device_close(struct inode *inode, struct file *filp) {
 
 	//  Unmap the event register
 	iounmap(dev->event);
-	iounmap(dev->filllevel_reg);
 	iounmap(dev->status_reg);
 
 	return 0;
@@ -257,6 +273,7 @@ static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
 	dev->led_control_reg = (uint32_t *) ioremap(LED_CONTROL_BASE + (index * 4), 4);
 	dev->fifo_control_reg = (uint32_t *) ioremap(FIFO_CONTROL_BASE + (index * 4) , 4);
 	dev->phase_word_control_reg = (uint32_t *) ioremap(PHASE_WORD_CONTROL_BASE + (index * 4), 4);
+	dev->filllevel_reg = ioremap(FIFO_FILL_LEVEL + (index * 4), 4);
 
 	sema_init(&dev->sem, 1);
 	init_waitqueue_head(&dev->queue);
@@ -292,6 +309,7 @@ static void hpsdr_cleanup_module(void) {
 		kfree(hpsdr_devices);
 		iounmap(&hpsdr_devices[i].fifo_register);
 		iounmap(&hpsdr_devices[i].led_control_reg);
+		iounmap(&hpsdr_devices[i].filllevel_reg);
 	}
 
 	class_unregister(hpsdr_class);
