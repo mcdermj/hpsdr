@@ -64,6 +64,7 @@ struct hpsdr_dev {
 	uint8_t *event;
 	DECLARE_KFIFO_PTR(read_fifo, uint32_t);
 	struct semaphore sem;
+	spinlock_t open_lock;
 	wait_queue_head_t queue;
 	uint8_t index;
 	uint32_t *rx_buffer;
@@ -72,6 +73,7 @@ struct hpsdr_dev {
 	uint32_t *led_control_reg;
 	uint32_t *fifo_control_reg;
 	uint32_t *phase_word_control_reg;
+	int open_count;
 };
 
 // XXX This really shouldn't be here
@@ -151,6 +153,18 @@ static int hpsdr_rx_device_open(struct inode *inode, struct file *filp) {
 
 	dev = container_of(inode->i_cdev, struct hpsdr_dev, cdev);
 	filp->private_data = dev;
+	
+	//  Make sure that nobody else is using the device.
+	spin_lock(&dev->open_lock);
+	if(dev->open_count) {
+		spin_unlock(&dev->open_lock);
+		return -EBUSY;
+	}
+	
+	dev->open_count++;
+	spin_unlock(&dev->open_lock);
+	
+	err("Acquired spinlock\n");
 
 	//  Clean out the FIFOs of old data
 	ioread32(dev->fifo_register);
@@ -223,6 +237,8 @@ static int hpsdr_rx_device_close(struct inode *inode, struct file *filp) {
 	//  Unmap the event register
 	iounmap(dev->event);
 	iounmap(dev->status_reg);
+	
+	dev->open_count--;
 
 	return 0;
 }
@@ -277,6 +293,9 @@ static int hpsdr_create_rxdev(int index, struct hpsdr_dev *dev) {
 
 	sema_init(&dev->sem, 1);
 	init_waitqueue_head(&dev->queue);
+	spin_lock_init(&dev->open_lock);
+	
+	dev->open_count = 0;
 	
 	dev->rx_buffer = kmalloc(RX_INT_BUFFER_SIZE * sizeof(uint32_t), GFP_KERNEL);
 
