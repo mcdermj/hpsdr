@@ -246,21 +246,22 @@ static ssize_t hpsdr_rx_device_read(struct file *filp, char __user *buf, size_t 
 	int retval;
 	unsigned int copied;
 	struct hpsdr_dev *dev = filp->private_data;
+	size_t count_elements = count / kfifo_esize(&dev->read_fifo);
 
 	if(down_interruptible(&dev->sem))
 		return -ERESTARTSYS;
 
-	while(kfifo_is_empty(&dev->read_fifo)) {
+	//while(kfifo_is_empty(&dev->read_fifo)) {
+	while(kfifo_len(&dev->read_fifo) < count_elements) {
 		up(&dev->sem);
 		if(filp->f_flags & O_NONBLOCK)
 			return -EAGAIN;
-		if(wait_event_interruptible(dev->queue, !kfifo_is_empty(&dev->read_fifo)))
+		if(wait_event_interruptible(dev->queue, kfifo_len(&dev->read_fifo) >= count_elements))
 			return -ERESTARTSYS;
 		if(down_interruptible(&dev->sem))
 			return -ERESTARTSYS;
 	}
 
-	// count = count > kfifo_len(&dev->read_fifo) ? kfifo_len(&dev->read_fifo) : count;
 	retval = kfifo_to_user(&dev->read_fifo, buf, count, &copied);
 	up(&dev->sem);
 	return retval ? retval : copied;
